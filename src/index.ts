@@ -9,11 +9,10 @@ import { truncate, extractTextFromParts } from "./utils"
 // NOTE: do not `export` this constant — opencode's legacy plugin loader
 // treats every named export as a plugin function and throws if any export
 // is not a function ("Plugin export is not a function").
-const PLUGIN_VERSION = "0.1.6"
+const PLUGIN_VERSION = "0.1.7"
 const NOTIFICATION_TITLE = "warp://cli-agent"
 
-function sendPermissionNotification(perm: Permission, cwd: string): void {
-    const sessionId = perm.sessionID
+function buildPermissionPayload(perm: Permission, cwd: string) {
     const toolName = perm.type || "unknown"
     const metadata = perm.metadata || {}
 
@@ -34,12 +33,11 @@ function sendPermissionNotification(perm: Permission, cwd: string): void {
         summary += `: ${truncate(toolPreview, 120)}`
     }
 
-    const body = buildPayload("permission_request", sessionId, cwd, {
+    return buildPayload("permission_request", perm.sessionID, cwd, {
         summary,
         tool_name: toolName,
         tool_input: metadata,
     })
-    warpNotify(NOTIFICATION_TITLE, body)
 }
 
 export const WarpPlugin: Plugin = async ({ client, directory }) => {
@@ -73,17 +71,41 @@ export const WarpPlugin: Plugin = async ({ client, directory }) => {
             console.error("[opencode-warp] failed to emit init log:", err)
         })
 
+    const subagentCache = new Map<string, boolean>()
+
+    async function isSubagentSession(sessionId?: string): Promise<boolean> {
+        if (!sessionId) return false
+        if (subagentCache.has(sessionId)) return subagentCache.get(sessionId)!
+        try {
+            const session = await client.session.get({
+                path: { id: sessionId },
+            })
+            const result = !!session.data?.parentID
+            subagentCache.set(sessionId, result)
+            return result
+        } catch {
+            // If we can't fetch the session, fall through and notify anyway
+            return false
+        }
+    }
+
+    async function maybeWarpNotify(sessionId: string | undefined, body: string): Promise<void> {
+        if (await isSubagentSession(sessionId)) return
+        warpNotify(NOTIFICATION_TITLE, body)
+    }
+
     return {
         event: async ({ event }: { event: Event }) => {
             const cwd = directory || ""
 
             switch (event.type) {
                 case "session.created": {
-                    const sessionId = event.properties.info.id
-                    const body = buildPayload("session_start", sessionId, cwd, {
+                    const info = event.properties.info
+                    if (info.parentID) return
+                    const body = buildPayload("session_start", info.id, cwd, {
                         plugin_version: PLUGIN_VERSION,
                     })
-                    warpNotify(NOTIFICATION_TITLE, body)
+                    await maybeWarpNotify(info.id, body)
                     return
                 }
 
@@ -129,12 +151,15 @@ export const WarpPlugin: Plugin = async ({ client, directory }) => {
                         response: truncate(response, 200),
                         transcript_path: "",
                     })
-                    warpNotify(NOTIFICATION_TITLE, body)
+                    await maybeWarpNotify(sessionId, body)
                     return
                 }
 
                 case "permission.updated": {
-                    sendPermissionNotification(event.properties, cwd)
+                    await maybeWarpNotify(
+                        event.properties.sessionID,
+                        buildPermissionPayload(event.properties, cwd),
+                    )
                     return
                 }
 
@@ -142,7 +167,7 @@ export const WarpPlugin: Plugin = async ({ client, directory }) => {
                     const { sessionID, response } = event.properties
                     if (response === "reject") return
                     const body = buildPayload("permission_replied", sessionID, cwd)
-                    warpNotify(NOTIFICATION_TITLE, body)
+                    await maybeWarpNotify(sessionID, body)
                     return
                 }
 
@@ -150,7 +175,10 @@ export const WarpPlugin: Plugin = async ({ client, directory }) => {
                     // permission.asked is listed in the opencode docs but has no SDK type.
                     // Handle it with the same logic as permission.updated.
                     if ((event as any).type === "permission.asked") {
-                        sendPermissionNotification((event as any).properties, cwd)
+                        await maybeWarpNotify(
+                            (event as any).properties?.sessionID,
+                            buildPermissionPayload((event as any).properties, cwd),
+                        )
                     }
                 }
             }
@@ -162,13 +190,14 @@ export const WarpPlugin: Plugin = async ({ client, directory }) => {
         // completion notification.)
         "chat.message": async (input, output) => {
             const cwd = directory || ""
+
             const queryText = extractTextFromParts(output.parts)
             if (!queryText) return
 
             const body = buildPayload("prompt_submit", input.sessionID, cwd, {
                 query: truncate(queryText, 200),
             })
-            warpNotify(NOTIFICATION_TITLE, body)
+            await maybeWarpNotify(input.sessionID, body)
         },
 
         // Fires before a tool executes — used to detect the built-in
@@ -180,7 +209,7 @@ export const WarpPlugin: Plugin = async ({ client, directory }) => {
             const body = buildPayload("question_asked", input.sessionID, cwd, {
                 tool_name: input.tool,
             })
-            warpNotify(NOTIFICATION_TITLE, body)
+            await maybeWarpNotify(input.sessionID, body)
         },
 
         // Tool completion — fires after every tool call
@@ -192,7 +221,7 @@ export const WarpPlugin: Plugin = async ({ client, directory }) => {
             const body = buildPayload("tool_complete", sessionId, cwd, {
                 tool_name: toolName,
             })
-            warpNotify(NOTIFICATION_TITLE, body)
+            await maybeWarpNotify(sessionId, body)
         },
     }
 }
