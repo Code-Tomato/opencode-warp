@@ -1,52 +1,220 @@
-import type { OpenCodeEvent, SessionInfo } from "@opencode/client"
+import path from "node:path"
+import type {
+  OpenCodeEvent,
+  SessionInfo,
+  SessionMessageInfo,
+} from "@opencode/client"
 import type { Plugin } from "@opencode/plugin/tui"
 import { buildPayload } from "./payload.js"
 import { warpNotify } from "./notify.js"
 import { extractTextFromParts, truncate } from "./utils.js"
 import { PLUGIN_VERSION } from "./version.js"
 
+const REQUEST_TIMEOUT_MS = 2_000
+const MAX_SEEN_EVENTS = 512
+
+type SessionEvent = Extract<
+  OpenCodeEvent,
+  {
+    type:
+      | "session.created"
+      | "session.deleted"
+      | "session.moved"
+      | "session.inbox.enqueued"
+      | "session.inbox.delivered"
+      | "session.inbox.cancelled"
+      | "session.execution.succeeded"
+      | "session.execution.failed"
+      | "session.execution.interrupted"
+      | "permission.asked"
+      | "permission.replied"
+      | "form.created"
+      | "session.tool.input.started"
+      | "session.tool.success"
+      | "session.tool.failed"
+  }
+>
+
+type NotificationSession = Pick<
+  SessionInfo,
+  "id" | "parentID" | "location" | "subpath"
+>
+type Summary = { query: string; response: string }
+type SessionState = {
+  controller: AbortController
+  pending: Promise<void>
+  info?: NotificationSession
+  announced: boolean
+  query?: string
+  inbox: Map<string, string | undefined>
+  tools: Map<string, string>
+  completed: Set<string>
+  seen: Set<string>
+}
+
+function isSessionEvent(event: OpenCodeEvent): event is SessionEvent {
+  switch (event.type) {
+    case "session.created":
+    case "session.deleted":
+    case "session.moved":
+    case "session.inbox.enqueued":
+    case "session.inbox.delivered":
+    case "session.inbox.cancelled":
+    case "session.execution.succeeded":
+    case "session.execution.failed":
+    case "session.execution.interrupted":
+    case "permission.asked":
+    case "permission.replied":
+    case "form.created":
+    case "session.tool.input.started":
+    case "session.tool.success":
+    case "session.tool.failed":
+      return true
+    default:
+      return false
+  }
+}
+
+function summarize(
+  messages: readonly SessionMessageInfo[],
+  before: number,
+): Summary {
+  const history = messages
+    .filter((message) => message.time.created <= before)
+    .reverse()
+  const user = history.find((message) => message.type === "user")
+  const assistant = history.find((message) => message.type === "assistant")
+  return {
+    query: user?.type === "user" ? user.text : "",
+    response:
+      assistant?.type === "assistant"
+        ? extractTextFromParts(assistant.content)
+        : "",
+  }
+}
+
 export default {
   id: "opencode-warp.cli",
   setup(ctx) {
     if (!process.env.WARP_CLI_AGENT_PROTOCOL_VERSION) return
 
-    let disposed = false
-    let pending = Promise.resolve()
-    const sessions = new Map<string, SessionInfo>()
-    const completedTools = new Map<string, Set<string>>()
-    const toolNames = new Map<string, Map<string, string>>()
+    const controller = new AbortController()
+    const sessions = new Map<string, SessionState>()
 
-    function notify(
-      event: string,
-      session: SessionInfo,
-      fields: Record<string, unknown> = {},
-    ) {
-      if (disposed) return
-      warpNotify(
-        "warp://cli-agent",
-        buildPayload(event, session.id, session.location.directory, fields),
+    function ownsSession(sessionID: string) {
+      const route = ctx.ui.router.current()
+      if (
+        route.type === "session" &&
+        ctx.data.session.root(route.sessionID) === sessionID
+      )
+        return true
+      return (
+        ctx.ui.tabs.enabled() &&
+        ctx.ui.tabs.list().some((tab) => tab.sessionID === sessionID)
       )
     }
 
-    async function handle(event: OpenCodeEvent) {
-      switch (event.type) {
-        case "session.created":
-        case "session.inbox.enqueued":
-        case "session.execution.succeeded":
-        case "session.execution.failed":
-        case "session.execution.interrupted":
-        case "permission.asked":
-        case "permission.replied":
-        case "form.created":
-        case "session.tool.input.started":
-        case "session.tool.success":
-        case "session.tool.failed":
-        case "session.deleted":
-          break
-        default:
-          return
+    function stateFor(sessionID: string) {
+      let state = sessions.get(sessionID)
+      if (!state) {
+        state = {
+          controller: new AbortController(),
+          pending: Promise.resolve(),
+          announced: false,
+          inbox: new Map(),
+          tools: new Map(),
+          completed: new Set(),
+          seen: new Set(),
+        }
+        for (const item of ctx.data.session.pending.list(sessionID)) {
+          state.inbox.set(
+            item.id,
+            item.type === "user" ? item.payload.text : undefined,
+          )
+        }
+        sessions.set(sessionID, state)
       }
+      return state
+    }
 
+    async function request<T>(
+      state: SessionState,
+      run: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T> {
+      const signal = AbortSignal.any([
+        controller.signal,
+        state.controller.signal,
+        AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      ])
+      signal.throwIfAborted()
+      let abort = () => {}
+      const aborted = new Promise<never>((_, reject) => {
+        abort = () => reject(signal.reason)
+        if (signal.aborted) abort()
+        else signal.addEventListener("abort", abort, { once: true })
+      })
+      try {
+        return await Promise.race([aborted, run(signal)])
+      } finally {
+        signal.removeEventListener("abort", abort)
+      }
+    }
+
+    function notify(
+      state: SessionState,
+      info: NotificationSession,
+      event: string,
+      fields: Record<string, unknown> = {},
+    ) {
+      if (
+        controller.signal.aborted ||
+        state.controller.signal.aborted ||
+        !ownsSession(info.id)
+      )
+        return
+      const paths = info.location.directory.startsWith("/")
+        ? path.posix
+        : path.win32
+      const cwd = info.subpath
+        ? paths.join(info.location.directory, info.subpath)
+        : info.location.directory
+      if (!state.announced) {
+        warpNotify(
+          "warp://cli-agent",
+          buildPayload("session_start", info.id, cwd, {
+            plugin_version: PLUGIN_VERSION,
+          }),
+        )
+        state.announced = true
+      }
+      if (event !== "session_start")
+        warpNotify(
+          "warp://cli-agent",
+          buildPayload(event, info.id, cwd, fields),
+        )
+    }
+
+    async function handle(
+      event: SessionEvent,
+      sessionID: string,
+      state: SessionState,
+      snapshot?: Summary,
+    ) {
+      if (
+        controller.signal.aborted ||
+        state.controller.signal.aborted ||
+        !ownsSession(sessionID)
+      )
+        return
+      if (event.type === "session.deleted") {
+        state.controller.abort()
+        sessions.delete(sessionID)
+        return
+      }
+      if (event.type === "session.moved") {
+        state.info = undefined
+        return
+      }
       if (
         ctx.location &&
         event.location &&
@@ -54,43 +222,60 @@ export default {
           ctx.location.workspaceID !== event.location.workspaceID)
       )
         return
-
-      const sessionID =
-        event.type === "form.created"
-          ? event.data.form.sessionID
-          : event.data.sessionID
-      if (event.type === "session.deleted") {
-        sessions.delete(sessionID)
-        completedTools.delete(sessionID)
-        toolNames.delete(sessionID)
+      if (event.type === "session.inbox.enqueued") {
+        state.inbox.set(
+          event.data.inboxID,
+          event.data.item.type === "user"
+            ? event.data.item.payload.text
+            : undefined,
+        )
+        return
+      }
+      if (event.type === "session.inbox.cancelled") {
+        state.inbox.delete(event.data.inboxID)
         return
       }
 
-      let session = ctx.data.session.get(sessionID) ?? sessions.get(sessionID)
-      if (!session) {
+      let info = ctx.data.session.get(sessionID) ?? state.info
+      if (event.type === "session.created") {
+        info = {
+          id: sessionID,
+          parentID: event.data.parentID,
+          location: event.data.location,
+          subpath: event.data.subpath,
+        }
+      }
+      if (!info) {
         try {
-          session = await ctx.client.session.get({ sessionID })
-          if (session) sessions.set(sessionID, session)
+          info = await request(state, (signal) =>
+            ctx.client.session.get({ sessionID }, { signal }),
+          )
         } catch {
           return
         }
       }
-      if (!session || session.parentID || disposed) return
-      if (ctx.location && session.location.directory !== ctx.location.directory)
+      state.info = info
+      if (
+        info.parentID ||
+        (ctx.location && info.location.directory !== ctx.location.directory)
+      )
         return
 
       switch (event.type) {
         case "session.created":
-          if (!event.data.parentID)
-            notify("session_start", session, { plugin_version: PLUGIN_VERSION })
+          notify(state, info, "session_start")
           return
-        case "session.inbox.enqueued":
-          if (event.data.item.type === "user" && event.data.item.payload.text) {
-            notify("prompt_submit", session, {
-              query: truncate(event.data.item.payload.text, 200),
+        case "session.inbox.delivered": {
+          const query = state.inbox.get(event.data.inboxID)
+          state.inbox.delete(event.data.inboxID)
+          if (query !== undefined) {
+            state.query = query
+            notify(state, info, "prompt_submit", {
+              query: truncate(query, 200),
             })
           }
           return
+        }
         case "session.execution.succeeded":
         case "session.execution.failed":
         case "session.execution.interrupted": {
@@ -99,32 +284,30 @@ export default {
             event.data.reason === "superseded"
           )
             return
-          let query = ""
-          let response = ""
-          try {
-            const result = await ctx.client.session.context({ sessionID })
-            const messages = [...result].reverse()
-            const user = messages.find((message) => message.type === "user")
-            const assistant = messages.find(
-              (message) => message.type === "assistant",
-            )
-            if (user?.type === "user") query = user.text
-            if (assistant?.type === "assistant")
-              response = extractTextFromParts(assistant.content)
-          } catch {
-            // Completion notifications must still work when history is unavailable.
+          let summary = snapshot ?? { query: "", response: "" }
+          if (!snapshot) {
+            try {
+              const messages = await request(state, (signal) =>
+                ctx.client.session.context({ sessionID }, { signal }),
+              )
+              summary = summarize(messages, event.created)
+            } catch {
+              // Status updates must not depend on successful history retrieval.
+            }
           }
-          notify("stop", session, {
-            query: truncate(query, 200),
-            response: truncate(response, 200),
+          notify(state, info, "stop", {
+            query: truncate(state.query ?? summary.query, 200),
+            response: truncate(summary.response, 200),
             transcript_path: "",
           })
+          state.tools.clear()
+          state.completed.clear()
           return
         }
         case "permission.asked": {
           const { action, resources, metadata = {}, message } = event.data
           const preview = resources.join(", ")
-          notify("permission_request", session, {
+          notify(state, info, "permission_request", {
             summary: truncate(
               message ||
                 `Wants to run ${action}${preview ? `: ${preview}` : ""}`,
@@ -137,33 +320,22 @@ export default {
         }
         case "permission.replied":
           if (event.data.reply !== "reject")
-            notify("permission_replied", session)
+            notify(state, info, "permission_replied")
           return
         case "form.created":
-          notify("question_asked", session, { tool_name: "question" })
+          notify(state, info, "question_asked", { tool_name: "question" })
           return
-        case "session.tool.input.started": {
-          let names = toolNames.get(sessionID)
-          if (!names) {
-            names = new Map()
-            toolNames.set(sessionID, names)
-          }
-          names.set(
+        case "session.tool.input.started":
+          state.tools.set(
             `${event.data.assistantMessageID}:${event.data.id}`,
             event.data.name,
           )
           return
-        }
         case "session.tool.success":
         case "session.tool.failed": {
-          let completed = completedTools.get(sessionID)
-          if (!completed) {
-            completed = new Set()
-            completedTools.set(sessionID, completed)
-          }
           const key = `${event.data.assistantMessageID}:${event.data.id}`
-          if (completed.has(key)) return
-          completed.add(key)
+          if (state.completed.has(key)) return
+          state.completed.add(key)
           const message = ctx.data.session.message.get(
             sessionID,
             event.data.assistantMessageID,
@@ -175,29 +347,49 @@ export default {
                 )
               : undefined
           const name =
-            toolNames.get(sessionID)?.get(key) ??
+            state.tools.get(key) ??
             (content?.type === "tool" ? content.name : "unknown")
-          notify("tool_complete", session, { tool_name: name })
-          toolNames.get(sessionID)?.delete(key)
+          notify(state, info, "tool_complete", { tool_name: name })
+          state.tools.delete(key)
           return
         }
       }
     }
 
-    const unsubscribe = ctx.data.listen(({ details }) => {
-      // Preserve event order even when fetching session metadata or completion history.
-      pending = pending
-        .then(() => (disposed ? undefined : handle(details)))
+    const unsubscribe = ctx.data.listen(({ details: event }) => {
+      if (!isSessionEvent(event) || controller.signal.aborted) return
+      for (const [id, state] of sessions) {
+        if (ownsSession(id)) continue
+        state.controller.abort()
+        sessions.delete(id)
+      }
+      const sessionID =
+        event.type === "form.created"
+          ? event.data.form.sessionID
+          : event.data.sessionID
+      if (!ownsSession(sessionID)) return
+      const state = stateFor(sessionID)
+      if (state.seen.has(event.id)) return
+      state.seen.add(event.id)
+      if (state.seen.size > MAX_SEEN_EVENTS)
+        state.seen.delete(state.seen.values().next().value!)
+
+      let snapshot: Summary | undefined
+      if (event.type.startsWith("session.execution.")) {
+        const messages = ctx.data.session.message.list(sessionID)
+        if (messages.length) snapshot = summarize(messages, event.created)
+      }
+      // Keep each session ordered without blocking another tab's permission notifications.
+      state.pending = state.pending
+        .then(() => handle(event, sessionID, state, snapshot))
         .catch((error) => {
           console.error("[opencode-warp] failed to process CLI event:", error)
         })
     })
     return () => {
-      disposed = true
+      controller.abort()
       unsubscribe()
       sessions.clear()
-      completedTools.clear()
-      toolNames.clear()
     }
   },
 } satisfies Plugin.Definition

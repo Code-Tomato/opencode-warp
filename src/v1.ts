@@ -1,5 +1,5 @@
 import type { Plugin } from "@opencode-ai/plugin"
-import type { Event, Permission } from "@opencode-ai/sdk"
+import type { Event } from "@opencode-ai/sdk"
 
 import { buildPayload } from "./payload.js"
 import { warpNotify } from "./notify.js"
@@ -8,8 +8,15 @@ import { PLUGIN_VERSION } from "./version.js"
 
 const NOTIFICATION_TITLE = "warp://cli-agent"
 
-function buildPermissionPayload(perm: Permission, cwd: string) {
-    const toolName = perm.type || "unknown"
+interface PermissionRequest {
+    sessionID: string
+    type?: string
+    permission?: string
+    metadata?: Record<string, unknown>
+}
+
+function buildPermissionPayload(perm: PermissionRequest, cwd: string) {
+    const toolName = perm.permission || perm.type || "unknown"
     const metadata = perm.metadata || {}
 
     let toolPreview = ""
@@ -85,7 +92,10 @@ export const WarpPlugin: Plugin = async ({ client, directory }) => {
         }
     }
 
-    async function maybeWarpNotify(sessionId: string | undefined, body: string): Promise<void> {
+    async function maybeWarpNotify(
+        sessionId: string | undefined,
+        body: string,
+    ): Promise<void> {
         if (await isSubagentSession(sessionId)) return
         warpNotify(NOTIFICATION_TITLE, body)
     }
@@ -134,7 +144,9 @@ export const WarpPlugin: Plugin = async ({ client, directory }) => {
                                     (m) => m.info.role === "assistant",
                                 )
                                 if (lastAssistant) {
-                                    response = extractTextFromParts(lastAssistant.parts)
+                                    response = extractTextFromParts(
+                                        lastAssistant.parts,
+                                    )
                                 }
                             }
                         } catch {
@@ -160,9 +172,17 @@ export const WarpPlugin: Plugin = async ({ client, directory }) => {
                 }
 
                 case "permission.replied": {
-                    const { sessionID, response } = event.properties
+                    const { sessionID } = event.properties
+                    const response =
+                        "reply" in event.properties
+                            ? event.properties.reply
+                            : event.properties.response
                     if (response === "reject") return
-                    const body = buildPayload("permission_replied", sessionID, cwd)
+                    const body = buildPayload(
+                        "permission_replied",
+                        sessionID,
+                        cwd,
+                    )
                     await maybeWarpNotify(sessionID, body)
                     return
                 }
@@ -173,7 +193,10 @@ export const WarpPlugin: Plugin = async ({ client, directory }) => {
                     if ((event as any).type === "permission.asked") {
                         await maybeWarpNotify(
                             (event as any).properties?.sessionID,
-                            buildPermissionPayload((event as any).properties, cwd),
+                            buildPermissionPayload(
+                                (event as any).properties,
+                                cwd,
+                            ),
                         )
                     }
                 }

@@ -7,6 +7,7 @@ Official [Warp](https://warp.dev) terminal integration for [OpenCode](https://op
 ### 🔔 Native Notifications
 
 Get native Warp notifications when OpenCode:
+
 - **Completes a task** — with a summary showing your prompt and the response
 - **Needs your input** — when a permission request is pending
 - **Runs a tool** — status updates as tools execute
@@ -22,7 +23,7 @@ Add the plugin to your `opencode.json`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-   "plugins": ["@warp-dot-dev/opencode-warp"]
+  "plugins": ["@warp-dot-dev/opencode-warp"]
 }
 ```
 
@@ -45,7 +46,8 @@ server, add the package to `plugins` in your local `~/.config/opencode/cli.json`
 ### OpenCode V1
 
 OpenCode 1.18.29 and newer use the same package with the V1 `plugin` configuration key.
-Older V1 releases can load the legacy entrypoint directly:
+Older V1 releases should keep the existing npm release pinned to
+`"@warp-dot-dev/opencode-warp@0.1.7"`, or load the legacy entrypoint from a local build:
 
 ```json
 {
@@ -69,6 +71,9 @@ This plugin uses Warp's [pluggable notifications](https://docs.warp.dev/features
 On V2, the CLI plugin listens to session creation, inbox admission, execution completion,
 permissions, forms, and tool lifecycle events. On V1, the server entrypoint uses the
 legacy events and hooks. Both suppress notifications for subagent sessions.
+V2 only notifies for the session currently displayed in this CLI and its open root-session
+tabs; other terminals' sessions are ignored. Queued prompts notify when delivered, not
+while waiting in the inbox.
 
 ## Configuration
 
