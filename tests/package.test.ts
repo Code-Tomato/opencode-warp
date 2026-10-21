@@ -39,7 +39,9 @@ describe("published entrypoints", () => {
         path.join(consumer, "consumer.ts"),
         `
         import plugin from "@warp-dot-dev/opencode-warp"
+        import server from "@warp-dot-dev/opencode-warp/server"
         const id: string = plugin.id
+        const serverId: string = server.id
         plugin.setup()
         const hooks: Promise<unknown> = plugin.server({})
       `,
@@ -76,6 +78,7 @@ describe("published entrypoints", () => {
         assert.ok(entries.tui?.endsWith("/dist/tui.js"))
         const server = (await Host.load(entries.server)).default
         const tui = (await Host.load(entries.tui)).default
+        assert.equal((await import("@warp-dot-dev/opencode-warp/server")).default, server)
         assert.equal(server.id, "opencode-warp")
         assert.equal(tui.id, "opencode-warp.cli")
         assert.equal(typeof server.server, "function")

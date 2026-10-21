@@ -96,7 +96,12 @@ function summarize(
 export default {
   id: "opencode-warp.cli",
   setup(ctx) {
-    if (!process.env.WARP_CLI_AGENT_PROTOCOL_VERSION) return
+    if (!process.env.WARP_CLI_AGENT_PROTOCOL_VERSION) {
+      console.warn(
+        "⚠️ Detected unsupported Warp version. Please update Warp to use this plugin.",
+      )
+      return
+    }
 
     const controller = new AbortController()
     const sessions = new Map<string, SessionState>()

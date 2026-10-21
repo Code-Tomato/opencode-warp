@@ -233,11 +233,16 @@ describe("OpenCode V2 plugin", () => {
     expect(PLUGIN_VERSION).toBe(require("../package.json").version)
   })
 
-  it("does not subscribe outside a supported Warp terminal", () => {
+  it("warns and does not subscribe outside a supported Warp terminal", () => {
     const h = harness()
     h.cleanup?.()
+    const warn = spyOn(console, "warn").mockImplementation(() => {})
     delete process.env.WARP_CLI_AGENT_PROTOCOL_VERSION
     expect(tui.setup(h.ctx)).toBeUndefined()
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledWith(
+      "⚠️ Detected unsupported Warp version. Please update Warp to use this plugin.",
+    )
     expect(h.ctx.data.listen).toHaveBeenCalledTimes(1)
   })
 

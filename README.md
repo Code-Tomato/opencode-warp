@@ -45,8 +45,9 @@ server, add the package to `plugins` in your local `~/.config/opencode/cli.json`
 
 ### OpenCode V1
 
-OpenCode 1.18.29 and newer use the same package with the V1 `plugin` configuration key.
-Older V1 releases should keep the existing npm release pinned to
+The V2-compatible update is planned for `0.2.0`, with a new default entrypoint.
+OpenCode 1.18.29 and newer can use that release with the V1 `plugin` configuration key.
+Older V1 releases must keep the existing npm release pinned to
 `"@warp-dot-dev/opencode-warp@0.1.7"`, or load the legacy entrypoint from a local build:
 
 ```json
