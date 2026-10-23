@@ -8,7 +8,9 @@ import type { Plugin } from "@opencode/plugin/tui"
 import { buildPayload } from "./payload.js"
 import { warpNotify } from "./notify.js"
 import { extractTextFromParts, truncate } from "./utils.js"
-import { PLUGIN_VERSION } from "./version.js"
+
+// Must match the version in package.json.
+const PLUGIN_VERSION = "0.1.7"
 
 const REQUEST_TIMEOUT_MS = 2_000
 const MAX_SEEN_EVENTS = 512

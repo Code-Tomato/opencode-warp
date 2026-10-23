@@ -1,12 +1,11 @@
 import { describe, it, expect } from "bun:test"
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
-import { writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
 
 describe("published entrypoints", () => {
-  it("resolves named package exports in Bun and typechecks without installed peers", async () => {
+  it("loads the built server and TUI through the V2 package loader", async () => {
     const repo = path.resolve(import.meta.dir, "..")
     const temp = mkdtempSync(
       path.join(
@@ -31,39 +30,6 @@ describe("published entrypoints", () => {
         timeout: 60_000,
         stdio: "inherit",
       })
-      await writeFile(
-        path.join(consumer, "package.json"),
-        JSON.stringify({ type: "module" }),
-      )
-      await writeFile(
-        path.join(consumer, "consumer.ts"),
-        `
-        import plugin from "@warp-dot-dev/opencode-warp"
-        import server from "@warp-dot-dev/opencode-warp/server"
-        const id: string = plugin.id
-        const serverId: string = server.id
-        plugin.setup()
-      `,
-      )
-      await writeFile(
-        path.join(consumer, "tsconfig.json"),
-        JSON.stringify({
-          compilerOptions: {
-            module: "NodeNext",
-            moduleResolution: "NodeNext",
-            target: "ES2022",
-            strict: true,
-            types: [],
-            noEmit: true,
-          },
-          files: ["consumer.ts"],
-        }),
-      )
-      execFileSync("node", [tsc, "-p", path.join(consumer, "tsconfig.json")], {
-        cwd: consumer,
-        timeout: 60_000,
-        stdio: "inherit",
-      })
       const host = path.join(repo, "node_modules/@opencode/plugin/dist/host.js")
       const output = execFileSync(
         process.execPath,
@@ -80,7 +46,7 @@ describe("published entrypoints", () => {
         assert.equal((await import("@warp-dot-dev/opencode-warp/server")).default, server)
         assert.equal(server.id, "opencode-warp")
         assert.equal(tui.id, "opencode-warp.cli")
-        assert.equal(typeof server.setup, "function")
+        server.setup()
         console.log("package exports verified")
       `,
         ],

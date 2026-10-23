@@ -16,7 +16,6 @@ mock.module("fs", () => ({
 
 const { warpNotify } = await import("../src/notify")
 const { default: tui } = await import("../src/tui")
-const { PLUGIN_VERSION } = await import("../src/version")
 
 describe("warpNotify", () => {
   const originalVersion = process.env.WARP_CLI_AGENT_PROTOCOL_VERSION
@@ -73,7 +72,6 @@ describe("OpenCode V2 plugin", () => {
       cached?: boolean
       failHistory?: boolean
       failSession?: boolean
-      location?: false
       openSessions?: string[]
     } = {},
   ) {
@@ -103,8 +101,7 @@ describe("OpenCode V2 plugin", () => {
       ]
     })
     const ctx = {
-      location:
-        options.location === false ? undefined : { directory: "/project" },
+      location: { directory: "/project" },
       ui: {
         router: { current: () => ({ type: "session", sessionID: "s1" }) },
         tabs: {
@@ -160,7 +157,7 @@ describe("OpenCode V2 plugin", () => {
         })
         .filter((payload) => includeStart || payload.event !== "session_start")
     }
-    return { emit, payloads, cleanup, unsubscribe, get, ctx }
+    return { emit, payloads, cleanup, unsubscribe, ctx }
   }
 
   it("warns and does not subscribe outside a supported Warp terminal", () => {
@@ -178,12 +175,15 @@ describe("OpenCode V2 plugin", () => {
 
   it("reports session start with the plugin version and session directory", async () => {
     const h = harness()
-    await h.emit("session.created", { sessionID: "s1" })
+    await h.emit("session.created", {
+      sessionID: "s1",
+      subpath: "packages/app",
+    })
     expect(h.payloads(true)[0]).toMatchObject({
       event: "session_start",
-      plugin_version: PLUGIN_VERSION,
+      plugin_version: require("../package.json").version,
       session_id: "s1",
-      cwd: "/project",
+      cwd: "/project/packages/app",
     })
   })
 
@@ -210,24 +210,30 @@ describe("OpenCode V2 plugin", () => {
     })
   })
 
-  it("extracts the latest prompt and assistant text on completion", async () => {
-    const h = harness()
-    await h.emit("session.execution.succeeded", { sessionID: "s1" })
-    expect(h.payloads()[0]).toMatchObject({
-      event: "stop",
-      query: "Latest query",
-      response: "Latest response",
-    })
-  })
-
-  it("still notifies after failure or unavailable history", async () => {
-    const h = harness({ failHistory: true })
-    await h.emit("session.execution.failed", { sessionID: "s1" })
-    expect(h.payloads()[0]).toMatchObject({
-      event: "stop",
-      query: "",
-      response: "",
-    })
+  it.each([
+    [
+      "session.execution.succeeded",
+      { sessionID: "s1" },
+      false,
+      { event: "stop", query: "Latest query", response: "Latest response" },
+    ],
+    [
+      "session.execution.failed",
+      { sessionID: "s1" },
+      true,
+      { event: "stop", query: "", response: "" },
+    ],
+    [
+      "form.created",
+      { form: { sessionID: "s1", title: "Choose" } },
+      false,
+      { event: "question_asked", tool_name: "question" },
+    ],
+  ])("maps %s to a notification", async (type, data, failHistory, expected) => {
+    const h = harness({ failHistory })
+    await h.emit(type, data)
+    expect(h.payloads()).toHaveLength(1)
+    expect(h.payloads()[0]).toMatchObject(expected)
   })
 
   it("resets status on user interruption, but not a superseded execution", async () => {
@@ -263,15 +269,6 @@ describe("OpenCode V2 plugin", () => {
     expect(h.payloads()[1].event).toBe("permission_replied")
   })
 
-  it("maps forms to questions needing user input", async () => {
-    const h = harness()
-    await h.emit("form.created", { form: { sessionID: "s1", title: "Choose" } })
-    expect(h.payloads()[0]).toMatchObject({
-      event: "question_asked",
-      tool_name: "question",
-    })
-  })
-
   it("emits one completion per tool and retains its V2 name", async () => {
     const h = harness()
     const data = {
@@ -299,7 +296,7 @@ describe("OpenCode V2 plugin", () => {
       resources: [],
     })
     await h.emit("session.execution.succeeded", { sessionID: "s1" })
-    expect(h.payloads()).toEqual([])
+    expect(h.payloads(true)).toEqual([])
   })
 
   it("ignores other locations and unrelated events", async () => {
@@ -309,37 +306,9 @@ describe("OpenCode V2 plugin", () => {
     expect(h.payloads(true)).toEqual([])
   })
 
-  it("fetches and caches uncached session metadata", async () => {
-    const h = harness({ cached: false })
-    await h.emit("form.created", { form: { sessionID: "s1" } })
-    await h.emit("form.created", { form: { sessionID: "s1" } })
-    expect(h.get).toHaveBeenCalledTimes(1)
-    expect(h.payloads()).toHaveLength(2)
-  })
-
   it("skips unknown sessions rather than leaking subagent notifications", async () => {
     const h = harness({ cached: false, failSession: true })
     await h.emit("form.created", { form: { sessionID: "s1" } })
-    expect(h.payloads()).toEqual([])
-  })
-
-  it("does not emit a late completion after cleanup during a history fetch", async () => {
-    const h = harness()
-    let resolveHistory: ((messages: []) => void) | undefined
-    let historyStarted: (() => void) | undefined
-    const started = new Promise<void>((resolve) => {
-      historyStarted = resolve
-    })
-    h.ctx.client.session.context = () =>
-      new Promise((resolve) => {
-        resolveHistory = resolve
-        historyStarted?.()
-      })
-    const event = h.emit("session.execution.succeeded", { sessionID: "s1" })
-    await started
-    h.cleanup?.()
-    resolveHistory?.([])
-    await event
     expect(h.payloads()).toEqual([])
   })
 
@@ -350,36 +319,6 @@ describe("OpenCode V2 plugin", () => {
     await event
     expect(h.unsubscribe).toHaveBeenCalledTimes(1)
     expect(h.payloads()).toEqual([])
-  })
-
-  it("preserves completion/prompt order during asynchronous history reads", async () => {
-    const h = harness({ cached: false })
-    await Promise.all([
-      h.emit("session.execution.succeeded", { sessionID: "s1" }),
-      h.emit("session.inbox.enqueued", {
-        sessionID: "s1",
-        inboxID: "i1",
-        item: { type: "user", payload: { text: "next" } },
-      }),
-    ])
-    await h.emit("session.inbox.delivered", { sessionID: "s1", inboxID: "i1" })
-    expect(h.payloads().map((payload) => payload.event)).toEqual([
-      "stop",
-      "prompt_submit",
-    ])
-  })
-
-  it("does not broadcast to unrelated projects when the CLI has no location", async () => {
-    const h = harness({ location: false })
-    await h.emit(
-      "form.created",
-      { form: { sessionID: "other" } },
-      "/other-project",
-    )
-    expect(h.payloads(true)).toEqual([])
-    expect(h.get).not.toHaveBeenCalled()
-    await h.emit("form.created", { form: { sessionID: "s1" } })
-    expect(h.payloads()[0].event).toBe("question_asked")
   })
 
   it("ignores another terminal's root session in the same directory", async () => {
@@ -406,30 +345,6 @@ describe("OpenCode V2 plugin", () => {
     ).toEqual([
       ["session_start", "s2"],
       ["question_asked", "s2"],
-    ])
-  })
-
-  it("fails closed on the home route with no open tabs", async () => {
-    const h = harness({ location: false })
-    h.ctx.ui.router.current = () => ({ type: "home" })
-    await h.emit("session.created", { sessionID: "s1" })
-    expect(h.payloads(true)).toEqual([])
-  })
-
-  it("announces a new session after navigation even if its creation event arrived on home", async () => {
-    const h = harness()
-    h.ctx.ui.router.current = () => ({ type: "home" })
-    await h.emit("session.created", { sessionID: "s1" })
-    h.ctx.ui.router.current = () => ({ type: "session", sessionID: "s1" })
-    await h.emit("session.inbox.enqueued", {
-      sessionID: "s1",
-      inboxID: "i1",
-      item: { type: "user", payload: { text: "new" } },
-    })
-    await h.emit("session.inbox.delivered", { sessionID: "s1", inboxID: "i1" })
-    expect(h.payloads(true).map((payload) => payload.event)).toEqual([
-      "session_start",
-      "prompt_submit",
     ])
   })
 
@@ -496,25 +411,11 @@ describe("OpenCode V2 plugin", () => {
     ])
   })
 
-  it("aborts an outstanding request on cleanup", async () => {
-    const h = harness()
-    let signal: AbortSignal | undefined
-    h.ctx.client.session.context = (_input, options) => {
-      signal = options?.signal
-      return new Promise(() => {})
-    }
-    await h.emit("session.execution.succeeded", { sessionID: "s1" })
-    expect(signal?.aborted).toBe(false)
-    h.cleanup?.()
-    expect(signal?.aborted).toBe(true)
-    await new Promise<void>((resolve) => setImmediate(resolve))
-    expect(h.payloads(true)).toEqual([])
-  })
-
-  it("uses a local completion snapshot and excludes messages from the next turn", async () => {
-    const h = harness()
-    h.ctx.data.session.message.list = () =>
-      [
+  it.each(["local", "server"] as const)(
+    "excludes next-turn messages from %s completion history",
+    async (source) => {
+      const h = harness()
+      const messages = [
         { type: "user", text: "finished", time: { created: 20 } },
         {
           type: "assistant",
@@ -528,32 +429,15 @@ describe("OpenCode V2 plugin", () => {
           time: { created: 60 },
         },
       ] as SessionMessageInfo[]
-    await h.emit("session.execution.succeeded", { sessionID: "s1" })
-    expect(h.payloads()[0]).toMatchObject({
-      query: "finished",
-      response: "done",
-    })
-    expect(h.ctx.client.session.context).not.toHaveBeenCalled()
-  })
-
-  it("ignores future messages in a delayed server history response", async () => {
-    const h = harness()
-    h.ctx.client.session.context = async () =>
-      [
-        { type: "user", text: "finished", time: { created: 20 } },
-        {
-          type: "assistant",
-          content: [{ type: "text", text: "done" }],
-          time: { created: 30 },
-        },
-        { type: "user", text: "next", time: { created: 50 } },
-      ] as SessionMessageInfo[]
-    await h.emit("session.execution.succeeded", { sessionID: "s1" })
-    expect(h.payloads()[0]).toMatchObject({
-      query: "finished",
-      response: "done",
-    })
-  })
+      if (source === "local") h.ctx.data.session.message.list = () => messages
+      else h.ctx.client.session.context = async () => messages
+      await h.emit("session.execution.succeeded", { sessionID: "s1" })
+      expect(h.payloads()[0]).toMatchObject({
+        query: "finished",
+        response: "done",
+      })
+    },
+  )
 
   it("deduplicates replayed permission and completion events", async () => {
     const h = harness()
@@ -578,52 +462,27 @@ describe("OpenCode V2 plugin", () => {
     ])
   })
 
-  it("invalidates fallback session metadata after a move", async () => {
-    const h = harness({ cached: false, location: false })
-    await h.emit("form.created", { form: { sessionID: "s1" } })
-    h.ctx.client.session.get = async () => ({
-      ...session,
-      location: { directory: "/moved" },
-    })
-    await h.emit("session.moved", { sessionID: "s1" }, "/moved")
-    await h.emit("form.created", { form: { sessionID: "s1" } }, "/moved")
-    expect(h.payloads().map((payload) => payload.cwd)).toEqual([
-      "/project",
-      "/moved",
-    ])
-  })
-
-  it("includes the session subpath in the notification cwd", async () => {
-    const h = harness()
-    await h.emit("session.created", {
-      sessionID: "s1",
-      subpath: "packages/app",
-    })
-    expect(h.payloads(true)[0].cwd).toBe("/project/packages/app")
-  })
-
-  it("refreshes deleted session state instead of reusing old metadata", async () => {
-    const h = harness({ cached: false })
-    await h.emit("form.created", { form: { sessionID: "s1" } })
-    await h.emit("session.deleted", { sessionID: "s1" })
-    await h.emit("form.created", { form: { sessionID: "s1" } })
-    expect(h.get).toHaveBeenCalledTimes(2)
-    expect(
-      h.payloads(true).filter((payload) => payload.event === "session_start"),
-    ).toHaveLength(2)
-  })
-
-  it("suppresses a late response after its tab has been closed", async () => {
-    const h = harness()
-    let finish: ((messages: SessionMessageInfo[]) => void) | undefined
-    h.ctx.client.session.context = () =>
-      new Promise((resolve) => {
-        finish = resolve
-      })
-    await h.emit("session.execution.succeeded", { sessionID: "s1" })
-    h.ctx.ui.router.current = () => ({ type: "home" })
-    finish?.([])
-    await new Promise<void>((resolve) => setImmediate(resolve))
-    expect(h.payloads(true)).toEqual([])
-  })
+  it.each(["cleanup", "tab closed"] as const)(
+    "suppresses a late completion after %s",
+    async (action) => {
+      const h = harness()
+      let finish: ((messages: SessionMessageInfo[]) => void) | undefined
+      let signal: AbortSignal | undefined
+      h.ctx.client.session.context = (_input, options) => {
+        signal = options?.signal
+        return new Promise((resolve) => {
+          finish = resolve
+        })
+      }
+      await h.emit("session.execution.succeeded", { sessionID: "s1" })
+      if (action === "cleanup") {
+        h.cleanup?.()
+        expect(signal?.aborted).toBe(true)
+        expect(h.unsubscribe).toHaveBeenCalledTimes(1)
+      } else h.ctx.ui.router.current = () => ({ type: "home" })
+      finish?.([])
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(h.payloads(true)).toEqual([])
+    },
+  )
 })

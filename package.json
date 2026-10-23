@@ -63,10 +63,6 @@
   "directories": {
     "test": "tests"
   },
-  "dependencies": {
-    "undici-types": "^7.18.2",
-    "zod": "^4.1.8"
-  },
   "bugs": {
     "url": "https://github.com/warpdotdev/opencode-warp/issues"
   }
