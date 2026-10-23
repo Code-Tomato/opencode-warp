@@ -15,8 +15,6 @@ mock.module("fs", () => ({
 }))
 
 const { warpNotify } = await import("../src/notify")
-const { default: plugin } = await import("../src/index")
-const { WarpPlugin } = await import("../src/v1")
 const { default: tui } = await import("../src/tui")
 const { PLUGIN_VERSION } = await import("../src/version")
 
@@ -49,66 +47,6 @@ describe("warpNotify", () => {
     expect(data).toContain('{"event":"stop"}')
     expect(data).toMatch(/^\x1b\]777;notify;/)
     expect(data).toMatch(/\x07$/)
-  })
-})
-
-describe("OpenCode V1 permission schemas", () => {
-  const originalVersion = process.env.WARP_CLI_AGENT_PROTOCOL_VERSION
-  afterEach(() => {
-    writeSpy.mockClear()
-    if (originalVersion === undefined)
-      delete process.env.WARP_CLI_AGENT_PROTOCOL_VERSION
-    else process.env.WARP_CLI_AGENT_PROTOCOL_VERSION = originalVersion
-  })
-
-  async function legacy() {
-    process.env.WARP_CLI_AGENT_PROTOCOL_VERSION = "1"
-    const hooks = await WarpPlugin({
-      directory: "/project",
-      client: {
-        app: { log: async () => {} },
-        session: { get: async () => ({ data: { id: "s1" } }) },
-      },
-    } as unknown as Parameters<typeof WarpPlugin>[0])
-    return async (type: string, properties: object) => {
-      await hooks.event?.({ event: { type, properties } } as never)
-    }
-  }
-
-  it("recognizes the legacy permission.updated type field", async () => {
-    const emit = await legacy()
-    await emit("permission.updated", {
-      sessionID: "s1",
-      type: "bash",
-      metadata: { command: "git status" },
-    })
-    expect(
-      (writeSpy.mock.calls[0] as unknown as [string, string])[1],
-    ).toContain('"tool_name":"bash"')
-  })
-
-  it("recognizes the newer permission.asked permission field", async () => {
-    const emit = await legacy()
-    await emit("permission.asked", {
-      sessionID: "s1",
-      permission: "bash",
-      metadata: { command: "git status" },
-    })
-    expect(
-      (writeSpy.mock.calls[0] as unknown as [string, string])[1],
-    ).toContain('"tool_name":"bash"')
-  })
-
-  it("does not report rejected requests as approvals with either reply schema", async () => {
-    const emit = await legacy()
-    await emit("permission.replied", { sessionID: "s1", response: "reject" })
-    await emit("permission.replied", { sessionID: "s1", reply: "reject" })
-    expect(writeSpy).not.toHaveBeenCalled()
-    await emit("permission.replied", { sessionID: "s1", reply: "once" })
-    expect(writeSpy.mock.calls).toHaveLength(1)
-    expect(
-      (writeSpy.mock.calls[0] as unknown as [string, string])[1],
-    ).toContain('"event":"permission_replied"')
   })
 })
 
@@ -225,14 +163,6 @@ describe("OpenCode V2 plugin", () => {
     return { emit, payloads, cleanup, unsubscribe, get, ctx }
   }
 
-  it("exposes a valid V2 definition and the V1 server entrypoint", () => {
-    expect(plugin.id).toBe("opencode-warp")
-    expect(typeof plugin.setup).toBe("function")
-    expect(plugin.server).toBe(WarpPlugin)
-    expect(tui.id).toBe("opencode-warp.cli")
-    expect(PLUGIN_VERSION).toBe(require("../package.json").version)
-  })
-
   it("warns and does not subscribe outside a supported Warp terminal", () => {
     const h = harness()
     h.cleanup?.()
@@ -244,31 +174,6 @@ describe("OpenCode V2 plugin", () => {
       "⚠️ Detected unsupported Warp version. Please update Warp to use this plugin.",
     )
     expect(h.ctx.data.listen).toHaveBeenCalledTimes(1)
-  })
-
-  it("preserves the V1 prompt and tool hooks", async () => {
-    process.env.WARP_CLI_AGENT_PROTOCOL_VERSION = "1"
-    const hooks = await WarpPlugin({
-      directory: "/project",
-      client: {
-        app: { log: async () => {} },
-        session: { get: async () => ({ data: { id: "s1" } }) },
-      },
-    } as unknown as Parameters<typeof WarpPlugin>[0])
-    await hooks["chat.message"]?.({ sessionID: "s1" }, {
-      parts: [{ type: "text", text: "Legacy prompt" }],
-    } as never)
-    await hooks["tool.execute.before"]?.(
-      { tool: "question", sessionID: "s1", callID: "t1" },
-      { args: {} },
-    )
-    expect(writeSpy.mock.calls).toHaveLength(2)
-    expect(
-      (writeSpy.mock.calls[0] as unknown as [string, string])[1],
-    ).toContain("prompt_submit")
-    expect(
-      (writeSpy.mock.calls[1] as unknown as [string, string])[1],
-    ).toContain("question_asked")
   })
 
   it("reports session start with the plugin version and session directory", async () => {
@@ -401,7 +306,7 @@ describe("OpenCode V2 plugin", () => {
     const h = harness()
     await h.emit("session.created", { sessionID: "s1" }, "/other-project")
     await h.emit("model.updated", {})
-    expect(h.payloads()).toEqual([])
+    expect(h.payloads(true)).toEqual([])
   })
 
   it("fetches and caches uncached session metadata", async () => {
@@ -488,11 +393,20 @@ describe("OpenCode V2 plugin", () => {
   })
 
   it("includes open root-session tabs but never their subagents", async () => {
-    const h = harness({ openSessions: ["s1", "s2"] })
+    const h = harness({ openSessions: ["s1", "s2", "child"] })
+    const getSession = h.ctx.data.session.get
+    h.ctx.data.session.get = (id) =>
+      id === "child"
+        ? ({ ...session, id, parentID: "s2" } as SessionInfo)
+        : getSession(id)
     await h.emit("form.created", { form: { sessionID: "s2" } })
     await h.emit("form.created", { form: { sessionID: "child" } })
-    expect(h.payloads()).toHaveLength(1)
-    expect(h.payloads()[0].session_id).toBe("s2")
+    expect(
+      h.payloads(true).map((payload) => [payload.event, payload.session_id]),
+    ).toEqual([
+      ["session_start", "s2"],
+      ["question_asked", "s2"],
+    ])
   })
 
   it("fails closed on the home route with no open tabs", async () => {

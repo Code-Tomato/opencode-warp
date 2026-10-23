@@ -45,14 +45,12 @@ server, add the package to `plugins` in your local `~/.config/opencode/cli.json`
 
 ### OpenCode V1
 
-The V2-compatible update is planned for `0.2.0`, with a new default entrypoint.
-OpenCode 1.18.29 and newer can use that release with the V1 `plugin` configuration key.
-Older V1 releases must keep the existing npm release pinned to
-`"@warp-dot-dev/opencode-warp@0.1.7"`, or load the legacy entrypoint from a local build:
+The V2-compatible update is planned for `0.2.0` and supports OpenCode V2 only.
+All OpenCode V1 users must pin the plugin to `0.1.7` using the V1 `plugin` key:
 
 ```json
 {
-  "plugin": ["file:///absolute/path/to/opencode-warp/dist/v1.js"]
+  "plugin": ["@warp-dot-dev/opencode-warp@0.1.7"]
 }
 ```
 
@@ -70,9 +68,8 @@ This plugin uses Warp's [pluggable notifications](https://docs.warp.dev/features
 3. Sends an OSC 777 escape sequence to Warp, which displays a native notification
 
 On V2, the CLI plugin listens to session creation, inbox admission, execution completion,
-permissions, forms, and tool lifecycle events. On V1, the server entrypoint uses the
-legacy events and hooks. Both suppress notifications for subagent sessions.
-V2 only notifies for the session currently displayed in this CLI and its open root-session
+permissions, forms, and tool lifecycle events. It suppresses notifications for subagent
+sessions and only notifies for the session currently displayed in this CLI and its open root-session
 tabs; other terminals' sessions are ignored. Queued prompts notify when delivered, not
 while waiting in the inbox.
 

@@ -6,7 +6,7 @@ import path from "node:path"
 import { execFileSync } from "node:child_process"
 
 describe("published entrypoints", () => {
-  it("resolves named package exports in Bun and typechecks without legacy peers", async () => {
+  it("resolves named package exports in Bun and typechecks without installed peers", async () => {
     const repo = path.resolve(import.meta.dir, "..")
     const temp = mkdtempSync(
       path.join(
@@ -43,7 +43,6 @@ describe("published entrypoints", () => {
         const id: string = plugin.id
         const serverId: string = server.id
         plugin.setup()
-        const hooks: Promise<unknown> = plugin.server({})
       `,
       )
       await writeFile(
@@ -81,7 +80,7 @@ describe("published entrypoints", () => {
         assert.equal((await import("@warp-dot-dev/opencode-warp/server")).default, server)
         assert.equal(server.id, "opencode-warp")
         assert.equal(tui.id, "opencode-warp.cli")
-        assert.equal(typeof server.server, "function")
+        assert.equal(typeof server.setup, "function")
         console.log("package exports verified")
       `,
         ],
