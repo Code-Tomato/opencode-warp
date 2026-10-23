@@ -1,7 +1,7 @@
 {
   "name": "@warp-dot-dev/opencode-warp",
   "version": "0.1.7",
-  "description": "Warp terminal integration for OpenCode \u2014 native notifications and more",
+  "description": "Warp terminal integration for OpenCode - native notifications and more",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
