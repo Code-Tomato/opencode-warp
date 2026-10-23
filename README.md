@@ -45,7 +45,6 @@ server, add the package to `plugins` in your local `~/.config/opencode/cli.json`
 
 ### OpenCode V1
 
-The V2-compatible update is planned for `0.2.0` and supports OpenCode V2 only.
 All OpenCode V1 users must pin the plugin to `0.1.7` using the V1 `plugin` key:
 
 ```json
