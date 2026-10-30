@@ -47,13 +47,13 @@
     "url": "git+https://github.com/warpdotdev/opencode-warp.git"
   },
   "devDependencies": {
-    "@opencode/client": "^2.0.18",
-    "@opencode/plugin": "^2.0.18",
+    "@opencode/client": "^2.2.4",
+    "@opencode/plugin": "^2.2.4",
     "@types/node": "^25.5.0",
     "typescript": "^5.0.0"
   },
   "peerDependencies": {
-    "@opencode/plugin": "^2.0.18"
+    "@opencode/plugin": "^2.2.4"
   },
   "peerDependenciesMeta": {
     "@opencode/plugin": {
