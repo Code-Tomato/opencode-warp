@@ -1,3 +1,4 @@
+import { createRequire } from "node:module"
 import path from "node:path"
 import type {
   OpenCodeEvent,
@@ -9,8 +10,10 @@ import { buildPayload } from "./payload.js"
 import { warpNotify } from "./notify.js"
 import { extractTextFromParts, truncate } from "./utils.js"
 
-// Must match the version in package.json.
-const PLUGIN_VERSION = "0.2.0"
+// Resolves to the package root from both src/ and dist/; npm always ships package.json.
+const PLUGIN_VERSION: string = createRequire(import.meta.url)(
+  "../package.json",
+).version
 
 const REQUEST_TIMEOUT_MS = 2_000
 const MAX_SEEN_EVENTS = 512
